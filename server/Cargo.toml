@@ -4,4 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-rand = "0.7.0"
+aes-gcm = "0.10.3"
+crypto = "0.5.1"
+elliptic-curve = "0.13.8"
+k256 = "0.13.4"
+rand = "0.8.5"
+rand_core = "0.6.4"
