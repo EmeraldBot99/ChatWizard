@@ -404,9 +404,11 @@ dependencies = [
  "aes-gcm",
  "crypto",
  "elliptic-curve",
+ "hmac",
  "k256",
  "rand",
  "rand_core",
+ "sha2",
 ]
 
 [[package]]
