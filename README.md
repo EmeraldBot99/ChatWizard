@@ -1,2 +1,2 @@
-# BaseSixChat
-An encrypted chat app written in Rust. 
+# ChatWizard
+An encrypted chat app written in Python.
