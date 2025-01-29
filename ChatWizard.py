@@ -412,30 +412,29 @@ def delete_message(db, username, message_id):
         raise Exception(f"Failed to delete message: {str(e)}")
 
 if __name__ == "__main__":
+    # Load the configuration
     config = load_or_create_config()
+    
+    # Generate prekeys if they don't exist
+    if not config.get("signed_prekey"):
+        config = generate_signed_prekey(config)
+        # Save the updated config
+        with CONFIG_FILE.open("w") as f:
+            json.dump(config, f, cls=CryptoJSONEncoder, indent=4)
+    
+    # Path to your Firebase service account key
     service_account_key_path = 'FIREBASE_SERVICE_ACCOUNT_KEY.json'
-    credentials = service_account.Credentials.from_service_account_file(service_account_key_path)
-    db = firestore.Client(credentials=credentials)
     
     try:
-        # Example: Send a message
-        recipient = "alice"
-        session_cipher, _ = establish_session(config, db, recipient)
-        
-        message = "Hello, this is a secure message!"
-        encrypted = send_message(session_cipher, message)
-        send_message(db, config['username'], recipient, encrypted)
-        
-        
-        messages = read_mailbox(db, config['username'], session_cipher)
-        for msg in messages:
-            print(f"From: {msg['sender']}")
-            print(f"Message: {msg['content']}")
-            print(f"Time: {msg['timestamp']}")
-            print("---")
-            
+        # Save keys to Firestore
+        user_data = save_prekeys_to_firestore(config, service_account_key_path)
+        print("\nKeys successfully uploaded to Firestore:")
+        print(f"Username: {config['username']}")
+        print(f"Registration ID: {user_data['identity']['registrationId']}")
+        print(f"Number of prekeys: {len(user_data['preKeys'])}")
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Error saving keys to Firestore: {e}")
+    
     
     
 
