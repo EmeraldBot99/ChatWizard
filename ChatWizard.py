@@ -424,11 +424,8 @@ if __name__ == "__main__":
         
         message = "Hello, this is a secure message!"
         encrypted = send_message(session_cipher, message)
-        send_to_mailbox(db, config['username'], recipient, encrypted)
+        send_message(db, config['username'], recipient, encrypted)
         
-        # Example: Read messages
-        unread = check_unread_count(db, config['username'])
-        print(f"You have {unread} unread messages")
         
         messages = read_mailbox(db, config['username'], session_cipher)
         for msg in messages:
