@@ -1,0 +1,22 @@
+Core functionality
+- encryption (signal protocol)
+- offline message handling
+- group chats
+- elegant GUI for handling sessions
+- account creation/ verification
+
+
+70-80%
+- markdown rendering
+- image support
+- video support
+- reactions to messages 
+
+90-100%
+- multiple devices
+- reduced server usage (less read write requests)
+
+
+nice to haves:
+scheduled messages
+typing indicators.
