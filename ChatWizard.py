@@ -6,35 +6,53 @@ import nacl.signing
 import json
 
 import sys
-
-# Determine the base directory dynamically
-if getattr(sys, 'frozen', False):  # Check if running as a PyInstaller executable
-    base_dir = Path(sys._MEIPASS)  # PyInstaller's temporary folder
+if getattr(sys, 'frozen', False):
+    base_dir = Path(sys._MEIPASS)  
 else:
-    base_dir = Path(__file__).resolve().parent  # Directory of the script
+    base_dir = Path(__file__).resolve().parent  
 
-# Add the signal-protocol folder to the Python path
-signal_protocol_path = base_dir / "signal-protocol"
-if signal_protocol_path.exists():
-    sys.path.insert(0, str(signal_protocol_path))
+
+service_account_key_path = base_dir / "serviceAccountKey.json"
+
+
+if getattr(sys, 'frozen', False):  
+    base_dir = Path(sys._MEIPASS)  
 else:
-    raise FileNotFoundError(f"signal-protocol folder not found at {signal_protocol_path}")
+    base_dir = Path(__file__).resolve().parent 
+
+
+# signal_protocol_path = base_dir / "signal-protocol"
+# if signal_protocol_path.exists():
+#     sys.path.insert(0, str(signal_protocol_path))
+# else:
+#     raise FileNotFoundError(f"signal-protocol folder not found at {signal_protocol_path}")
 
 from signal_protocol import curve, identity_key, state, storage, session, session_cipher, address, protocol
 import random
 import time
 
 from kivy.app import App
+from kivy.app import App
 from kivy.uix.boxlayout import BoxLayout
+from kivy.uix.gridlayout import GridLayout
 from kivy.uix.textinput import TextInput
 from kivy.uix.button import Button
 from kivy.uix.label import Label
 from kivy.uix.screenmanager import ScreenManager, Screen
+from kivy.uix.scrollview import ScrollView
+from kivy.core.window import Window
+from kivy.clock import Clock
+from kivy.uix.spinner import Spinner
+from kivy.graphics import Color, Rectangle
+from kivy.uix.popup import Popup
+
 from firebase_admin import auth
 
 APP_DIR = Path().home() / ".ChatWizard"
 CONFIG_FILE = APP_DIR / "config.json"
 APP_DIR.mkdir(parents=True, exist_ok=True)
+USERNAME = None
+USER_STORE = None
 
 # user handling
 def register_user(email, password):
@@ -222,6 +240,7 @@ def send_message(store, recipient_user_id,sender_user_id, plaintext):
     messages.append({"message": new_message, "sender_user_id": sender_user_id})
 
     mailbox_ref.set({"messages": messages})
+    store_message_history(sender_user_id, recipient_user_id, plaintext, True)
 
 def check_mailbox(store, recipient_user_id):
     db = firestore.client()
@@ -230,14 +249,94 @@ def check_mailbox(store, recipient_user_id):
         mailbox = mailbox_ref.get().to_dict()
 
         decrypted = []
-        if "messages" in mailbox:
+        if mailbox and "messages" in mailbox:
             for message in mailbox["messages"]:
-                decrypted.append([decrypt_message(store, message["sender_user_id"],protocol.PreKeySignalMessage.try_from(message["message"])),message["sender_user_id"]])
+                try:
+                    decrypted_msg = decrypt_message(
+                        store, 
+                        message["sender_user_id"],
+                        protocol.PreKeySignalMessage.try_from(message["message"])
+                    )
+                    timestamp = message.get("timestamp", int(time.time()))
+                    decrypted.append([
+                        decrypted_msg,
+                        message["sender_user_id"],
+                        timestamp
+                    ])
+                    
+                    store_message_history(recipient_user_id, message["sender_user_id"], decrypted_msg, False)
+                except Exception as e:
+                    print(f"Error decrypting message: {e}")
 
-        mailbox_ref.set({"messages": []})
-        return(decrypted)
-    except (TypeError):
+            mailbox_ref.set({"messages": []})
+            
+        return decrypted
+    except (TypeError) as e:
+        print(f"Error checking mailbox: {e}")
         return []
+    
+    
+def store_message_history(user_id, contact_id, message, is_sent):
+    history_dir = APP_DIR / "message_history"
+    history_dir.mkdir(exist_ok=True)
+    
+    chat_id = f"{min(user_id, contact_id)}_{max(user_id, contact_id)}"
+    history_file = history_dir / f"{chat_id}.json"
+    
+    if not history_file.exists():
+        with open(history_file, "w") as f:
+            json.dump([], f)
+    
+    with open(history_file, "r") as f:
+        try:
+            history = json.load(f)
+        except json.JSONDecodeError:
+            history = []
+    
+    history.append({
+        "sender": user_id if is_sent else contact_id,
+        "receiver": contact_id if is_sent else user_id,
+        "message": message,
+        "timestamp": int(time.time()),
+        "is_sent": is_sent
+    })
+    
+    with open(history_file, "w") as f:
+        json.dump(history, f)
+
+def get_message_history(user_id, contact_id):
+    history_dir = APP_DIR / "message_history"
+    chat_id = f"{min(user_id, contact_id)}_{max(user_id, contact_id)}"
+    history_file = history_dir / f"{chat_id}.json"
+    
+    if not history_file.exists():
+        return []
+        
+    with open(history_file, "r") as f:
+        try:
+            return json.load(f)
+        except json.JSONDecodeError:
+            return []
+        
+def get_contacts(user_id):
+    history_dir = APP_DIR / "message_history"
+    history_dir.mkdir(exist_ok=True)
+    
+    contacts = set()
+    for file in history_dir.glob("*.json"):
+        parts = file.stem.split("_")
+        if len(parts) == 2:
+            if parts[0] == user_id:
+                contacts.add(parts[1])
+            elif parts[1] == user_id:
+                contacts.add(parts[0])
+    
+    return list(contacts)
+
+def get_all_users():
+    db = firestore.client()
+    users = db.collection("users").stream()
+    return [user.id for user in users]
 
 def read_messages(user_data,username):
     while True:
@@ -266,109 +365,109 @@ class RegisterScreen(Screen):
         self.layout = BoxLayout(orientation='vertical', padding=10, spacing=10)
         
         self.email_input = TextInput(hint_text="Enter your username", size_hint=(1, None), height=40)
-        self.password_input = TextInput(hint_text="Enter your password", size_hint=(1, None), height=40, password=True)
         
-        self.register_button = Button(text="Register", size_hint=(1, None), height=50)
-        self.register_button.bind(on_press=self.register_user)
         
-        self.login_button = Button(text="Already have an account? Login", size_hint=(1, None), height=50)
+        self.login_button = Button(text="Login", size_hint=(1, None), height=50)
         self.login_button.bind(on_press=self.go_to_login)
         
         self.error_label = Label(text="", size_hint=(1, None), height=40)
         
         self.layout.add_widget(self.email_input)
-        self.layout.add_widget(self.password_input)
-        self.layout.add_widget(self.register_button)
         self.layout.add_widget(self.login_button)
         self.layout.add_widget(self.error_label)
         
         self.add_widget(self.layout)
+        print("test")
 
-    def register_user(self, instance):
-        email = self.email_input.text
-        password = self.password_input.text
-
-        if email and password:
-            try:
-                user = auth.create_user(email=email, password=password)
-                self.error_label.text = f"User registered successfully. UID: {user.uid}"
-            except Exception as e:
-                self.error_label.text = f"Error: {str(e)}"
-        else:
-            self.error_label.text = "Please fill in both fields."
 
     def go_to_login(self, instance):
-        self.manager.current = "login"
+        self.manager.current = "messages"
+        self.login_user()
+        
+        print("went to messages")
+
+    def login_user(self, **kwargs):
+        USERNAME = self.email_input.text
+
+        if (APP_DIR / (f"{USERNAME}.json")).exists():
+            user_store = create_in_mem_store(f"{USERNAME}.json")
+        else:
+            user_store = generate_user_data(USERNAME)
+            store_server_data(USERNAME, user_store)
+            store_local_data(user_store, f"{USERNAME}.json")
+        USER_STORE = user_store
+        self.manager.current = "messages"
 
 
-class LoginScreen(Screen):
+class ConversationTile(BoxLayout):
+    def __init__(self, name, last_message, **kwargs):
+        super().__init__(orientation='vertical', size_hint_y=None, height=(60), padding=5, **kwargs)
+        self.add_widget(Label(text=name, size_hint_y=None, height=(24), bold=True))
+        self.add_widget(Label(text=last_message, size_hint_y=None, height=(24), color=(0.5,0.5,0.5,1)))
+
+
+class MessageScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        
-        self.layout = BoxLayout(orientation='vertical', padding=10, spacing=10)
-        
-        self.email_input = TextInput(hint_text="Enter your username", size_hint=(1, None), height=40)
-        self.password_input = TextInput(hint_text="Enter your password", size_hint=(1, None), height=40, password=True)
-        
-        self.login_button = Button(text="Login", size_hint=(1, None), height=50)
-        self.login_button.bind(on_press=self.login_user)
-        
-        self.register_button = Button(text="Don't have an account? Register", size_hint=(1, None), height=50)
-        self.register_button.bind(on_press=self.go_to_register)
-        
-        self.error_label = Label(text="", size_hint=(1, None), height=40)
-        
-        self.layout.add_widget(self.email_input)
-        self.layout.add_widget(self.password_input)
-        self.layout.add_widget(self.login_button)
-        self.layout.add_widget(self.register_button)
-        self.layout.add_widget(self.error_label)
-        
-        self.add_widget(self.layout)
+        root = BoxLayout(orientation='horizontal')
+        self.add_widget(root)
 
-    def login_user(self, instance):
-        email = self.email_input.text
-        password = self.password_input.text
+        conv_scroll = ScrollView(size_hint_x=0.3)
+        conv_list = BoxLayout(orientation='vertical', size_hint_y=None, spacing=5, padding=5)
+        conv_list.bind(minimum_height=conv_list.setter('height'))
+        conv_scroll.add_widget(conv_list)
+        root.add_widget(conv_scroll)
 
-        if email and password:
-            try:
-                user = auth.get_user_by_email(email)
-                # Optionally, you can add password verification logic here
-                self.error_label.text = f"Logged in successfully. UID: {user.uid}"
-            except Exception as e:
-                self.error_label.text = f"Error: {str(e)}"
-        else:
-            self.error_label.text = "Please fill in both fields."
+        chat_pane = BoxLayout()
+        root.add_widget(chat_pane)
+        
+        conversations = [
+            ("Alice", "Hey, are we still on for tomorrow?"),
+            ("Bob", "Got the files you sent, thanks!"),
+            ("Carol", "Let’s catch up soon.")
+        ]
 
-    def go_to_register(self, instance):
-        self.manager.current = "register"
 
+        for name, last in conversations:
+            tile = ConversationTile(name, last)
+ 
+            tile.bind(on_touch_down=lambda inst, touch: print(f"Clicked {inst.children[0].text}") )
+            conv_list.add_widget(tile)
+
+        # conversations = get_contacts(USERNAME)
+
+        # for name in conversations:
+        #     message_history = get_message_history(USERNAME, name)
+        #     tile = ConversationTile(name, message_history[-1]["message"])
+        #     tile.bind(on_touch_down=lambda inst, touch: print(f"Clicked {inst.children[0].text}") )
+        #     conv_list.add_widget(tile)
+
+    def update_messages():
+        new_messages = check_mailbox(USER_STORE,USERNAME)
+        for message in new_messages:
+            store_message_history(USERNAME, message[1],message[0],True)
+    
+        
 
 class ChatWizardApp(App):
     def build(self):
         sm = ScreenManager()
 
         register_screen = RegisterScreen(name="register")
-        login_screen = LoginScreen(name="login")
+        # login_screen = LoginScreen(name="login")
+        message_screen = MessageScreen(name = "messages")
 
         sm.add_widget(register_screen)
-        sm.add_widget(login_screen)
+        # sm.add_widget(login_screen)
+        sm.add_widget(message_screen)
 
         return sm
 
-# if __name__ == '__main__':
-#     ChatWizardApp().run()
+if __name__ == '__main__':
+    cred = credentials.Certificate(str(service_account_key_path))
+    initialize_app(cred)
 
-
-
-
-
-
-
-
-
-
-
+    ChatWizardApp().run()
 
 
 # testing
@@ -377,48 +476,41 @@ import keyboard
 import sys
 import threading
 
-if getattr(sys, 'frozen', False):
-    base_dir = Path(sys._MEIPASS)  
-else:
-    base_dir = Path(__file__).resolve().parent  
 
 
-service_account_key_path = base_dir / "FIREBASE_SERVICE_ACCOUNT_KEY.json"
+# cred = credentials.Certificate(str(service_account_key_path))
+# initialize_app(cred)
 
 
-cred = credentials.Certificate(str(service_account_key_path))
-initialize_app(cred)
-
-
-db = firestore.client()
+# db = firestore.client()
 
 
 
-username = input("what is your username? ")
+# username = input("what is your username? ")
 
-if (APP_DIR / (f"{username}.json")).exists():
-    user_data = create_in_mem_store(f"{username}.json")
-else:
-    user_data = generate_user_data(username)
-    store_server_data(username, user_data)
-    store_local_data(user_data, f"{username}.json")
+# if (APP_DIR / (f"{username}.json")).exists():
+#     user_data = create_in_mem_store(f"{username}.json")
+# else:
+#     user_data = generate_user_data(username)
+#     store_server_data(username, user_data)
+#     store_local_data(user_data, f"{username}.json")
 
-# print(dir(user_data))
-thread = threading.Thread(target=read_messages, args=(user_data, username), daemon=True)
-thread.start()
+# # print(dir(user_data))
+# thread = threading.Thread(target=read_messages, args=(user_data, username), daemon=True)
+# thread.start()
 
-while (True):
-    if keyboard.is_pressed("s"):
-        recipient_id = input("who would you like to send a message to? (enter nothing to cancel) ")
-        if (recipient_id != ""):
-            if (not load_session(user_data,recipient_id,f"{username}.json")):
-                establish_session(user_data,recipient_id)
-                store_session(user_data,recipient_id,f"{username}.json")
+# while (True):
+#     if keyboard.is_pressed("s"):
+#         recipient_id = input("who would you like to send a message to? (enter nothing to cancel) ")
+#         if (recipient_id != ""):
+#             if (not load_session(user_data,recipient_id,f"{username}.json")):
+#                 establish_session(user_data,recipient_id)
+#                 store_session(user_data,recipient_id,f"{username}.json")
             
-            plaintext = input("whats the message? ")
-            if (plaintext != ""):
-                send_message(user_data,recipient_id,username,plaintext)
-                store_session(user_data,recipient_id,f"{username}.json")
-                print("message sent")
+#             plaintext = input("whats the message? ")
+#             if (plaintext != ""):
+#                 send_message(user_data,recipient_id,username,plaintext)
+#                 store_session(user_data,recipient_id,f"{username}.json")
+#                 print("message sent")
 
 

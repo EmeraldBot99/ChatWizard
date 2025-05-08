@@ -1,9 +1,9 @@
 Core functionality
-- encryption (signal protocol)
-- offline message handling
-- group chats
-- elegant GUI for handling sessions
-- account creation/ verification
+- encryption (signal protocol) ✔
+- offline message handling  ✔
+- group chats   
+- elegant GUI for handling sessions 
+- account creation/ verification 
 
 
 70-80%
