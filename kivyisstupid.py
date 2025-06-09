@@ -1,13 +1,11 @@
-from nacl.public import PrivateKey, PublicKey
-import nacl
 from pathlib import Path
 from firebase_admin import auth, credentials, initialize_app, firestore
-import nacl.signing
 import json
-
+import base64
 import sys
 import threading
-
+from PIL import Image
+import os
 
 if getattr(sys, 'frozen', False):
     base_dir = Path(sys._MEIPASS)  
@@ -208,8 +206,83 @@ def decrypt_message(store, sender_user_id, ciphertext):
     return plaintext.decode()
 
 
+def create_group(group_id: str, group_name: str, initial_members: list[str]):
+ 
+    db = firestore.client()
+    group_ref = db.collection("groups").document(group_id)
+
+    if group_ref.get().exists:
+        raise ValueError(f"Group '{group_id}' already exists")
+
+    group_data = {
+        "name": group_name,
+        "members": initial_members,
+        "created_at": firestore.SERVER_TIMESTAMP
+    }
+    group_ref.set(group_data)
+    print(f"Group '{group_id}' created with members {initial_members}")
+
+def get_group_members(group_id: str) -> list[str]:
+
+    db = firestore.client()
+    group_ref = db.collection("groups").document(group_id)
+    doc = group_ref.get()
+    if not doc.exists:
+        raise ValueError(f"Group '{group_id}' does not exist")
+    return doc.to_dict().get("members", [])
+
+def send_group_message(store, group_id: str, sender_user_id: str, plaintext: str):
+    db = firestore.client()
+
+    members = get_group_members(group_id).remove(sender_user_id)
+
+    conversation_name = f"group_{group_id}"
+
+    for recipient_user_id in members:
+        if not load_session(store, recipient_user_id, f"{sender_user_id}.json"):
+            try:
+                establish_session(store, recipient_user_id)
+                store_session(store, recipient_user_id, f"{sender_user_id}.json")
+                print(f"session established with {recipient_user_id}")
+            except Exception as e:
+                print(f"failed to establish session with {recipient_user_id}: {e}")
+                continue
+    
+        ciphertext = encrypt_message(store,recipient_user_id,plaintext).serialize()
+
+        mailbox_ref = db.collection("mailbox").document(recipient_user_id)
+        mailbox_doc = mailbox_ref.get()
+
+        if mailbox_doc.exists:
+            mailbox_data = mailbox_doc.to_dict()
+            if "messages" in mailbox_data:
+                messages = mailbox_data["messages"]
+            else:
+                messages = []
+        else:
+            messages = []
+
+        new_entry = {
+            "message": ciphertext, 
+            "sender_user_id": sender_user_id,
+            "group_chat": True,
+            "conversation_name": conversation_name,
+            "image": False,
+            "video": False
+        }
+        messages.append(new_entry)
+        mailbox_ref.set({"messages": messages})
+
+        store_message_history(sender_user_id, recipient_user_id, plaintext, True)
+
+    print(f"Group message sent from {sender_user_id} to group '{group_id}'")
+
+
 #TODO send notification when message sent
-def send_message(store, recipient_user_id,sender_user_id, plaintext):
+def send_message(store, recipient_user_id,sender_user_id, plaintext, group_chat = False, conversation_name = None):
+    if conversation_name == None:
+        conversation_name = f"{recipient_user_id}_{sender_user_id}"
+    
     new_message = encrypt_message(store,recipient_user_id,plaintext).serialize()
 
     db = firestore.client()
@@ -226,10 +299,94 @@ def send_message(store, recipient_user_id,sender_user_id, plaintext):
     else:
         messages = []
 
-    messages.append({"message": new_message, "sender_user_id": sender_user_id})
+    messages.append({
+        "message": new_message, 
+        "sender_user_id": sender_user_id, 
+        "group_chat": group_chat, 
+        "conversation_name": conversation_name, 
+        "image": False, 
+        "video": False,
+        "large_message": False
+    })
 
     mailbox_ref.set({"messages": messages})
     store_message_history(sender_user_id, recipient_user_id, plaintext, True)
+    print("message sent")
+
+
+def send_image(store, recipient_user_id, sender_user_id, image_file, group_chat = False, conversation_name = None):
+    if conversation_name == None:
+        conversation_name = f"{recipient_user_id}_{sender_user_id}"
+    
+    with open(compress_image(image_file, APP_DIR/"temp.jpg", 50), "rb") as img:
+        data = base64.b64encode(img.read()).decode("utf-8")
+
+    new_message = encrypt_message(store, recipient_user_id, data).serialize()
+    new_message_b64 = base64.b64encode(new_message).decode('utf-8')
+    
+    db = firestore.client()
+    
+    # Store the large message as a separate document
+    import uuid
+    message_id = str(uuid.uuid4())
+    large_message_ref = db.collection("large_messages").document(message_id)
+    large_message_ref.set({
+        "message": new_message_b64,
+        "sender_user_id": sender_user_id,
+        "recipient_user_id": recipient_user_id,
+        "timestamp": firestore.SERVER_TIMESTAMP,
+        "image": True
+    })
+    
+    # Store only a reference in the mailbox
+    mailbox_ref = db.collection("mailbox").document(recipient_user_id)
+    mailbox_doc = mailbox_ref.get()
+
+    if mailbox_doc.exists:
+        mailbox_data = mailbox_doc.to_dict()
+        if "messages" in mailbox_data:
+             messages = mailbox_data["messages"]
+        else:
+            messages = []
+    else:
+        messages = []
+
+    # Store reference to the large message instead of the message itself
+    messages.append({
+        "message_ref": message_id,  # Reference to the large message document
+        "sender_user_id": sender_user_id, 
+        "group_chat": group_chat, 
+        "conversation_name": conversation_name, 
+        "image": True, 
+        "video": False,
+        "large_message": True  # Flag to indicate this is a reference
+    })
+
+    mailbox_ref.set({"messages": messages})
+    store_message_history(sender_user_id, recipient_user_id, data, True, True)
+    print("image message sent")
+
+#TODO: make better
+def compress_image(image_path, output_path, target_size_kb):
+    img = Image.open(image_path)
+    width, height = img.size
+    img_format = img.format or 'JPEG'
+
+    while True:
+        new_width  = max(int(width * 0.9), 100)
+        new_height = max(int(height * 0.9), 100)
+        img = img.resize((new_width, new_height), Image.LANCZOS)
+
+        img.save(output_path, format=img_format)
+        size_kb = os.path.getsize(output_path) / 1024
+
+        if size_kb <= target_size_kb or new_width <= 100 or new_height <= 100:
+            break
+
+        width, height = new_width, new_height
+
+    return output_path
+
 
 def check_mailbox(store, recipient_user_id):
     # store = create_in_mem_store(f"tester.json")
@@ -244,6 +401,22 @@ def check_mailbox(store, recipient_user_id):
         if mailbox and "messages" in mailbox:
             for message in mailbox["messages"]:
                 try:
+                    # Check if this is a reference to a large message
+                    if message.get("large_message", False):
+                        # Fetch the actual message from the large_messages collection
+                        large_msg_ref = db.collection("large_messages").document(message["message_ref"])
+                        large_msg_doc = large_msg_ref.get()
+                        if large_msg_doc.exists:
+                            large_msg_data = large_msg_doc.to_dict()
+                            message_data = base64.b64decode(large_msg_data["message"])
+                        else:
+                            print(f"Large message {message['message_ref']} not found")
+                            continue
+                    else:
+                        message_data = message["message"]
+                        if isinstance(message_data, str):
+                            message_data = base64.b64decode(message_data)
+                
                     decrypted_msg = decrypt_message(
                         store, 
                         message["sender_user_id"],
@@ -269,7 +442,7 @@ def check_mailbox(store, recipient_user_id):
         return []
     
     
-def store_message_history(user_id, contact_id, message, is_sent):
+def store_message_history(user_id, contact_id, message, is_sent, image = False):
     history_dir = APP_DIR / "message_history"
     history_dir.mkdir(exist_ok=True)
     
@@ -291,7 +464,8 @@ def store_message_history(user_id, contact_id, message, is_sent):
         "receiver": contact_id if is_sent else user_id,
         "message": message,
         "timestamp": int(time.time()),
-        "is_sent": is_sent
+        "is_sent": is_sent,
+        "image": image
     })
     
     with open(history_file, "w") as f:
@@ -380,24 +554,33 @@ thread = threading.Thread(target=read_messages, args=(user_data, username), daem
 thread.start()
 
 
+
+message_path = APP_DIR/"outgoing_messages.json"
+
 while True:
-    pass
+    with open(message_path) as outgoing_messages:
+        outgoing_messages = json.load(outgoing_messages)
+        # print(outgoing_messages)
+    
+    for message in outgoing_messages:
+        if not load_session(user_data,message["recipient"],f"{username}.json"):
+            try:
+                establish_session(user_data, message["recipient"])
+                store_session(user_data, message["recipient"], f"{username}.json")
+                print(f"Session established with {message["recipient"]}")
+            except Exception as e:
+                print(f"Failed to establish session with {message["recipient"]}: {e}")
 
-# read_messages(user_data, username)
+        if message["message"] != None:
+            send_message(user_data,message["recipient"],message["sender"],message["message"])
+        if message["image"] != None:
+            print("send image")
+            send_image(user_data,message["recipient"],message["sender"],message["image"])
+
+    with open(message_path, "w") as f:
+        json.dump([], f, indent=2)
+        
 
 
-# while (True):
-#     if keyboard.is_pressed("s"):
-#         recipient_id = input("who would you like to send a message to? (enter nothing to cancel) ")
-#         if (recipient_id != ""):
-#             if (not load_session(user_data,recipient_id,f"{username}.json")):
-#                 establish_session(user_data,recipient_id)
-#                 store_session(user_data,recipient_id,f"{username}.json")
-            
-#             plaintext = input("whats the message? ")
-#             if (plaintext != ""):
-#                 send_message(user_data,recipient_id,username,plaintext)
-#                 store_session(user_data,recipient_id,f"{username}.json")
-#                 print("message sent")
 
-
+    time.sleep(0.1)
