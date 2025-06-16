@@ -8,7 +8,7 @@ import tkinter as tk
 from tkinter import filedialog
 import time
 from pytube import YouTube
-
+import webbrowser
 
 from firebase_admin import auth, credentials, initialize_app, firestore
 
@@ -32,6 +32,7 @@ from kivy.uix.filechooser import FileChooserListView
 from kivy.uix.filechooser import FileChooser
 from kivy.uix.image import Image as KivyImage
 from kivy.uix.videoplayer import VideoPlayer
+from kivy.uix.gridlayout import GridLayout
 import os
 import base64
 from PIL import Image
@@ -116,7 +117,12 @@ def get_contacts(user_id):
     return list(contacts)
 
 def start_kivy_is_stupid(username):
-    subprocess.run(["python", "kivyisstupid.py", username], check=True)
+    if getattr(sys, 'frozen', False):
+        base_dir = Path(sys.executable).parent
+    else:
+        base_dir = Path(__file__).resolve().parent
+    kivy_file = base_dir / "kivyisstupid.py"
+    subprocess.run([sys.executable, str(kivy_file), username], check=True)
 
 class ConversationTile(BoxLayout):
     def __init__(self, name, last_message, **kwargs):
@@ -188,6 +194,7 @@ class RegisterScreen(Screen):
         threading.Thread(target=start_kivy_is_stupid, args=(USERNAME,), daemon=True).start()
 
 class MessageScreen(Screen):
+    EMOJI_LIST = [':)', ':(', ':|', ';)', ':O', ':/']
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         app = App.get_running_app()
@@ -247,15 +254,17 @@ class MessageScreen(Screen):
         self.user_input.bind(on_text_validate=self.new_conversation)
         self.popup.content.add_widget(self.user_input)
         self.new_conversation_button.bind(on_press=self.popup.open)
+        # content_area.add_widget(self.new_conversation_button)
 
         self.right_layout = BoxLayout(orientation='vertical', size_hint=(0.7, 1))
-        content_area.add_widget(self.right_layout)
+        
 
         self.chat_pane = ScrollView(size_hint=(1, 0.85))
         self.chat_list = BoxLayout(orientation='vertical', size_hint_y=None, spacing=5, padding=10)
         self.chat_list.bind(minimum_height=self.chat_list.setter('height'))
         self.chat_pane.add_widget(self.chat_list)
         self.right_layout.add_widget(self.chat_pane)
+        content_area.add_widget(self.right_layout)
 
         
         self.attach_button = Button(
@@ -283,6 +292,20 @@ class MessageScreen(Screen):
         self.attach_button.bind(on_press=self.file_selection_popup.open)
 
 
+        self.emoji_picker = Popup(
+            title="Choose reaction",
+            size_hint=(None, None),
+            size=(300, 200)
+        )
+        grid = GridLayout(cols=3, spacing=10, padding=10)
+        for emo in self.EMOJI_LIST:
+            btn = Button(text=emo, font_size=24)
+            btn.bind(on_press=lambda btn, e=emo: self._on_emoji_selected(e))
+            grid.add_widget(btn)
+        self.emoji_picker.add_widget(grid)
+
+        self._pending_reaction_target = None
+
 
 
         self.input_layout = BoxLayout(orientation='horizontal', size_hint=(1, 0.15), padding=10, spacing=10)
@@ -302,6 +325,7 @@ class MessageScreen(Screen):
         self.send_button.bind(on_press=self.send_message)
         self.message_input.bind(on_text_validate=self.send_message)
 
+        self.input_layout.add_widget(self.new_conversation_button)
         self.input_layout.add_widget(self.attach_button)
         self.input_layout.add_widget(self.message_input)
         self.input_layout.add_widget(self.send_button)
@@ -393,7 +417,8 @@ class MessageScreen(Screen):
             "sender": USERNAME,
             "recipient": users,
             "message": "Hello! It is so good to meet you! Lets chat!",
-            "timestamp": Clock.get_time()
+            "timestamp": Clock.get_time(),
+            "image": None
         }
 
         messages.append(new_message)
@@ -456,6 +481,55 @@ class MessageScreen(Screen):
 
 
 
+
+    def markup_links(self, text):
+
+        URL_REGEX = re.compile(r'(https?://[^\s]+)',re.IGNORECASE)
+
+        def _repl(match):
+            url = match.group(1)
+            return f"[ref={url}]🔗 {url}[/color][/ref]"
+        return URL_REGEX.sub(_repl, text)
+    
+    def on_ref_press(self, instance, ref):
+
+        webbrowser.open(ref)
+
+    def open_emoji_picker(self, btn):
+
+        self._pending_reaction_target = btn._message_text
+        self.emoji_picker.open()
+
+    def _on_emoji_selected(self, emoji):
+        self.emoji_picker.dismiss()
+        orig = self._pending_reaction_target or ""
+        reaction_text = f"{USERNAME} reacted to “{orig}” with {emoji}"
+        
+        message_file = APP_DIR / "outgoing_messages.json"
+        if message_file.exists():
+            with open(message_file, "r") as f:
+                try:
+                    messages = json.load(f)
+                    if not isinstance(messages, list):
+                        messages = []
+                except json.JSONDecodeError:
+                    messages = []
+        else:
+            messages = []
+
+        new_msg = {
+            "sender": USERNAME,
+            "recipient": self.active_conversation,
+            "message": reaction_text,
+            "timestamp": Clock.get_time(),
+            "image": None
+        }
+        messages.append(new_msg)
+        with open(message_file, "w") as f:
+            json.dump(messages, f, indent=2)
+
+        self.refresh_chat_display(0)
+
     def refresh_chat_display(self, dt):
         if not self.active_conversation:
             return
@@ -477,9 +551,12 @@ class MessageScreen(Screen):
                 if entry["image"] != True:
                     sender = entry.get("sender", self.active_conversation)
                     msg = entry["message"]
-                
+                    linked_msg = self.markup_links(msg)
+
+                    row = BoxLayout(orientation='horizontal', size_hint_y=None, height=30)
+
                     lbl = Label(
-                        text=f"[b]{sender}:[/b] {msg}",
+                        text=f"[b]{sender}:[/b] {linked_msg}",
                         markup=True,
                         size_hint_y=None,
                         height=30,
@@ -488,19 +565,34 @@ class MessageScreen(Screen):
                         color=theme['text_color']
                     )
                     lbl.text_size = (self.chat_list.width * 0.9, None)
+                    lbl.bind(on_ref_press=self.on_ref_press)
                     self.chat_list.add_widget(lbl)
-                    
-                    url = self.get_youtube_url(msg)
-                    if url:
-                        try:
-                            print(f"trying to download {url}")
-                            filename = APP_DIR/f"{time.time()}.mp4"
-                            YouTube(url).streams.first().download(filename)
-                            player = VideoPlayer(source=filename, state='play',options={'fit_mode': 'contain'})
 
-                            self.chat_list.add_widget(player)
-                        except Exception as e:
-                            print(f"Error playing video: {e}")
+                    react_btn = Button(
+                        text=" + ",
+                        size_hint_x=0.1,
+                        font_size=14,
+                        background_color=theme['button_bg'],
+                        color=theme['button_text']
+                    )
+
+                    react_btn._message_text = msg
+                    react_btn.bind(on_press=self.open_emoji_picker)
+                    row.add_widget(react_btn)
+
+                    self.chat_list.add_widget(row)
+                    
+                    # url = self.get_youtube_url(msg)
+                    # if url:
+                    #     try:
+                    #         print(f"trying to download {url}")
+                    #         filename = APP_DIR/f"{time.time()}.mp4"
+                    #         YouTube(url).streams.first().download(filename)
+                    #         player = VideoPlayer(source=filename, state='play',options={'fit_mode': 'contain'})
+
+                    #         self.chat_list.add_widget(player)
+                    #     except Exception as e:
+                    #         print(f"Error playing video: {e}")
 
 
                 elif entry["image"] == True:

@@ -401,9 +401,7 @@ def check_mailbox(store, recipient_user_id):
         if mailbox and "messages" in mailbox:
             for message in mailbox["messages"]:
                 try:
-                    # Check if this is a reference to a large message
                     if message.get("large_message", False):
-                        # Fetch the actual message from the large_messages collection
                         large_msg_ref = db.collection("large_messages").document(message["message_ref"])
                         large_msg_doc = large_msg_ref.get()
                         if large_msg_doc.exists:
@@ -558,6 +556,9 @@ thread.start()
 message_path = APP_DIR/"outgoing_messages.json"
 
 while True:
+    if not message_path.exists():
+        with open(message_path ,"w") as f:
+            json.dump({}, f)
     with open(message_path) as outgoing_messages:
         outgoing_messages = json.load(outgoing_messages)
         # print(outgoing_messages)
