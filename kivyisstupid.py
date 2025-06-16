@@ -326,7 +326,6 @@ def send_image(store, recipient_user_id, sender_user_id, image_file, group_chat 
     
     db = firestore.client()
     
-    # Store the large message as a separate document
     import uuid
     message_id = str(uuid.uuid4())
     large_message_ref = db.collection("large_messages").document(message_id)
@@ -338,7 +337,6 @@ def send_image(store, recipient_user_id, sender_user_id, image_file, group_chat 
         "image": True
     })
     
-    # Store only a reference in the mailbox
     mailbox_ref = db.collection("mailbox").document(recipient_user_id)
     mailbox_doc = mailbox_ref.get()
 
@@ -351,15 +349,14 @@ def send_image(store, recipient_user_id, sender_user_id, image_file, group_chat 
     else:
         messages = []
 
-    # Store reference to the large message instead of the message itself
     messages.append({
-        "message_ref": message_id,  # Reference to the large message document
+        "message_ref": message_id,
         "sender_user_id": sender_user_id, 
         "group_chat": group_chat, 
         "conversation_name": conversation_name, 
         "image": True, 
         "video": False,
-        "large_message": True  # Flag to indicate this is a reference
+        "large_message": True  
     })
 
     mailbox_ref.set({"messages": messages})
